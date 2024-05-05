@@ -16,7 +16,7 @@ class CustomerAdmin(admin.ModelAdmin):
 
 
 class TaskAdmin(admin.ModelAdmin):
-	list_display = ("id", "collector", "customer", "task", "amount")
+	list_display = ("id", "collector", "customer", "amount_due")
 
 	def formfield_for_foreignkey(self, db_field, request, **kwargs):
 		if db_field.name == "manager":
