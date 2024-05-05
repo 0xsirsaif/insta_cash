@@ -24,6 +24,7 @@ class TaskSchema(Schema):
 	amount_due: float
 	amount_due_at: datetime
 	is_collected: bool
+	related_transaction: int
 
 
 class CollectSchema(Schema):
@@ -33,10 +34,12 @@ class CollectSchema(Schema):
 
 
 class PaySchema(Schema):
+	task_id: int
 	amount: float
+	timestamp: datetime
 
 
-api = NinjaAPI()
+api = NinjaAPI(version="1.0.0", urls_namespace="cash_collector")
 
 
 @api.get("/tasks", response={200: Optional[list[TaskSchema]]}, auth=BearerAuth())
@@ -50,6 +53,7 @@ def get_tasks(request):
 			"amount_due": task.amount_due,
 			"amount_due_at": task.amount_due_at,
 			"is_collected": task.is_collected,
+			"related_transaction": Transaction.objects.filter(task=task).id,
 		}
 		for task in tasks
 	]
@@ -58,6 +62,7 @@ def get_tasks(request):
 @api.get("/next_task", response={200: Optional[TaskSchema]}, auth=BearerAuth())
 def get_next_task(request):
 	task = Task.objects.filter(collector=request.auth, is_collected=False).order_by("amount_due_at").first()
+	related_transaction = Transaction.objects.filter(task=task)
 	if task:
 		return {
 			"id": task.id,
@@ -66,6 +71,7 @@ def get_next_task(request):
 			"amount_due": task.remaining_amount(),
 			"amount_due_at": task.amount_due_at,
 			"is_collected": task.is_collected,
+			"related_transaction": related_transaction,
 		}
 
 	return None
@@ -80,23 +86,24 @@ def status(request):
 def collect(request, payload: CollectSchema):
 	"""Cash collector collects the amount of money from the customer."""
 	task = get_object_or_404(Task, id=payload.task_id, collector=request.auth)
-	task_manager = task.manager
 	# create a transaction
 	transaction = Transaction.objects.create(
 		collector=request.auth,
-		manager=task_manager,
 		task=task,
 		amount=Decimal(payload.amount),
 		timestamp=payload.timestamp,
 	)
-	return {
-		"message": f"Transaction created with id {transaction.id} \nAmount: {payload.amount} \nTask: {task.id}"
-	}
+	return {"message": f"Transaction created with id {transaction.id}"}
 
 
 @api.post("/pay", auth=BearerAuth())
 def pay(request, payload: PaySchema):
 	"""Cash collector pays the amount of money to the manager."""
-	amount = Decimal(payload.amount)
-	request.auth.pay_to_manager(amount)
-	return {"message": f"Paid {amount} to the manager {request.auth.manager.first_name}"}
+	task = get_object_or_404(Task, id=payload.task_id, collector=request.auth)
+	transaction = Transaction.objects.create(
+		collector=request.auth,
+		task=task,
+		amount=-Decimal(payload.amount),
+		timestamp=payload.timestamp,
+	)
+	return {"message": f"Transaction created with id {transaction.id}"}

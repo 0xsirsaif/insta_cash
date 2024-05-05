@@ -4,10 +4,20 @@ from .models import Customer, Task, Transaction, User
 
 
 class TransactionAdmin(admin.ModelAdmin):
-	list_display = ("id", "collector", "manager", "amount", "timestamp", "deleted")
+	list_display = ("id", "collector", "amount", "timestamp")
+
+
+class UserAdmin(admin.ModelAdmin):
+	list_display = ("id", "username", "is_manager", "is_frozen")
+
+
+class CustomerAdmin(admin.ModelAdmin):
+	list_display = ("id", "name", "address", "phone", "email")
 
 
 class TaskAdmin(admin.ModelAdmin):
+	list_display = ("id", "collector", "customer", "task", "amount")
+
 	def formfield_for_foreignkey(self, db_field, request, **kwargs):
 		if db_field.name == "manager":
 			kwargs["queryset"] = User.objects.filter(is_manager=True)

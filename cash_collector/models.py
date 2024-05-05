@@ -12,17 +12,6 @@ class User(AbstractUser):
 	manager = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True)
 	is_frozen = models.BooleanField(default=False)
 	auth_token = models.CharField(max_length=100, blank=True, null=True)
-
-	def clean(self):
-		super().clean()
-
-		# Add custom validation for manager field
-		if self.is_manager and self.manager is not None:
-			raise ValidationError({"manager": _("A manager cannot have a manager.")})
-
-	def __str__(self):
-		return self.username
-
 	# Add related_name arguments to the groups and user_permissions fields
 	groups = models.ManyToManyField(
 		"auth.Group",
@@ -39,28 +28,15 @@ class User(AbstractUser):
 		verbose_name=_("user permissions"),
 	)
 
-	def pay_to_manager(self, amount):
-		"""
-		Pay the manager the amount of money.
-		"""
-		if self.is_manager:
-			raise ValueError("The user is a manager.")
+	def clean(self):
+		super().clean()
 
-		transaction = Transaction.objects.create(
-			collector=self,
-			manager=self.manager,
-			amount=-amount,
-		)
+		# Add custom validation for manager field
+		if self.is_manager and self.manager is not None:
+			raise ValidationError({"manager": _("A manager cannot have a manager.")})
 
-		# check if the threshold is exceeded
-		if Transaction.is_threshold_exceeded(self):
-			self.is_frozen = True
-			self.save()
-		else:
-			# unfreeze the user
-			self.is_frozen = False
-
-		return transaction
+	def __str__(self):
+		return self.username
 
 
 class Customer(models.Model):
@@ -85,7 +61,7 @@ class Task(models.Model):
 	def remaining_amount(self):
 		if self.is_collected:
 			return 0
-		total_collected = self.transactions.filter(deleted=False).aggregate(Sum("amount"))["amount__sum"] or 0
+		total_collected = self.transactions.aggregate(Sum("amount"))["amount__sum"] or 0
 		return self.amount_due - total_collected
 
 	def __str__(self):
@@ -94,23 +70,65 @@ class Task(models.Model):
 
 class Transaction(models.Model):
 	collector = models.ForeignKey(User, related_name="transactions_collected", on_delete=models.CASCADE)
-	manager = models.ForeignKey(User, related_name="transactions_paid", on_delete=models.CASCADE)
-	task = models.ForeignKey(Task, related_name="transactions", on_delete=models.CASCADE, null=True)
+
+	task = models.ForeignKey(Task, related_name="transactions", on_delete=models.CASCADE)
 	amount = models.DecimalField(max_digits=10, decimal_places=2)
 	timestamp = models.DateTimeField(auto_now_add=True)
-	deleted = models.BooleanField(default=False)
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
 
 	def save(self, *args, **kwargs):
-		is_pay = self.amount < 0
-		if not is_pay and self.collector.is_frozen:
-			raise ValueError("Cannot add a new transaction. The user is frozen.")
-		if not is_pay and self.amount > self.task.amount_due:
-			raise ValueError(
-				"Cannot add a new transaction. The transaction amount is more than the amount due in the task."
-			)
+		self.validate_transaction()
+
+		is_collect_transaction = self.amount > 0
+		if is_collect_transaction:
+			self.validate_collect_transaction()
+		else:
+			self.validate_pay_transaction()
+
 		super().save(*args, **kwargs)
+
+		# mark task as collected
+		self.task.is_collected = True
+		self.task.save()
+
+		# Add a signal to check if the threshold is exceeded
+		if Transaction.is_threshold_exceeded(self.collector):
+			self.collector.is_frozen = True
+			self.collector.save()
+		else:
+			self.collector.is_frozen = False
+			self.collector.save()
+
+	def validate_transaction(self):
+		if self.task is None:
+			raise ValueError("Cannot create a transaction without a task.")
+		if self.collector.is_manager:
+			raise ValueError("A manager cannot collect/pay money.")
+		if self.collector != self.task.collector:
+			raise ValueError("The collector is not the collector of the task.")
+
+	def validate_collect_transaction(self):
+		if self.amount <= 0:
+			raise ValueError("The amount should be greater than zero.")
+		if self.task.remaining_amount() == 0:
+			raise ValueError("The task is already collected.")
+		if self.collector.is_frozen:
+			raise ValueError("The user is frozen.")
+		if self.amount < self.task.remaining_amount():
+			raise ValueError("The amount is less than the remaining amount of the task.")
+		if self.amount > self.task.remaining_amount():
+			raise ValueError("The amount is more than the remaining amount of the task.")
+		if self.task.is_collected:
+			raise ValueError("The task is already collected.")
+
+		return True
+
+	def validate_pay_transaction(self):
+		if self.amount >= 0:
+			raise ValueError("The amount should be less than zero.")
+
+		return True
 
 	@classmethod
 	def is_threshold_exceeded(cls, collector):
@@ -119,9 +137,9 @@ class Transaction(models.Model):
 		"""
 		x_days_ago = timezone.now() - timezone.timedelta(days=settings.DAYS_THRESHOLD)
 		total_amount = (
-			cls.objects.filter(collector=collector, timestamp__gte=x_days_ago, deleted=False).aggregate(
-				Sum("amount")
-			)["amount__sum"]
+			cls.objects.filter(collector=collector, timestamp__gte=x_days_ago).aggregate(Sum("amount"))[
+				"amount__sum"
+			]
 			or 0
 		)
 		return total_amount > settings.USD_THRESHOLD
